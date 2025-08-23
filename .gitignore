@@ -1,0 +1,16 @@
+# Go / build
+bin/
+dist/
+*.exe
+*.out
+*.test
+coverage.txt
+
+# Env & editor
+.env
+.idea/
+.vscode/
+.DS_Store
+
+# Docker
+*.tar.gz

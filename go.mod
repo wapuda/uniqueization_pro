@@ -1,4 +1,4 @@
-module github.com/you/tg-unifier
+module github.com/dreamstore/tg-unifier
 
 go 1.22
 

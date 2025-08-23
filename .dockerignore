@@ -1,0 +1,7 @@
+.git
+docker
+node_modules
+dist
+bin
+*.md
+*.tar.gz
