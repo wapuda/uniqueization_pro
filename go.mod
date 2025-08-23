@@ -1,4 +1,4 @@
-module github.com/dreamstore/tg-unifier
+module github.com/wapuda/uniqueization_pro
 
 go 1.22
 
