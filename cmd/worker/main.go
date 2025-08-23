@@ -27,7 +27,7 @@ import (
 	"github.com/oklog/ulid/v2"
 	"github.com/redis/go-redis/v9"
 
-	"github.com/you/tg-unifier/internal/jobs"
+	"github.com/wapuda/uniqueization_pro/internal/jobs"
 )
 
 var (
@@ -741,4 +741,9 @@ func randRange(a, b float64) float64 {
 	return a + rand.Float64()*(b-a)
 }
 
-func even(x int) int { if x%2 == 0 { return x }; return x - 1 }
+func even(x int) int {
+	if x%2 == 0 {
+		return x
+	}
+	return x - 1
+}
