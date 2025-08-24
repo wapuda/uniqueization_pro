@@ -16,11 +16,13 @@ import (
 	"github.com/hibiken/asynq"
 	"github.com/joho/godotenv"
 	"github.com/redis/go-redis/v9"
+	"github.com/rs/zerolog/log"
+	"github.com/wapuda/uniqueization_pro/internal/logx"
 
 	"github.com/wapuda/uniqueization_pro/internal/jobs"
 )
 
-type cfg struct {
+type cfg struct {	
 	RedisAddr       string
 	PerVideoMax     int
 	DailyMax        int
@@ -79,6 +81,9 @@ func main() {
 	_ = godotenv.Load()
 	c := loadCfg()
 
+	logx.Setup(logx.FromEnv("bot"))
+	log.Info().Msg("bot starting")
+
 	token := os.Getenv("BOT_TOKEN")
 	if token == "" {
 		log.Fatal("BOT_TOKEN is required")
@@ -96,6 +101,9 @@ func main() {
 		log.Fatal(err)
 	}
 	bot.Debug = false
+
+	// on successful auth:
+	log.Info().Str("username", bot.Self.UserName).Msg("bot authorized")
 
 	rdb := redis.NewClient(&redis.Options{Addr: c.RedisAddr})
 	asClient := asynq.NewClient(asynq.RedisClientOpt{Addr: c.RedisAddr})
@@ -127,6 +135,12 @@ func main() {
 // --- Handlers ---
 
 func (s *server) onMessage(m *tgbotapi.Message) {
+	// Log key UI events
+	log.Info().
+		Int64("chat_id", m.Chat.ID).
+		Int64("user_id", m.From.ID).
+		Msg("message received")
+
 	// Commands
 	if m.IsCommand() {
 		switch m.Command() {
@@ -169,6 +183,10 @@ func (s *server) onMessage(m *tgbotapi.Message) {
 		_, _ = s.bot.Send(tgbotapi.NewMessage(m.Chat.ID, "Internal error (pending). Try again."))
 		return
 	}
+	
+	// Log key UI events - single video received
+	log.Info().Int("count", 1).Msg("videos collected; asking for format")
+	
 	s.setState(m.From.ID, "awaiting_format")
 	s.askFormat(m.Chat.ID)
 }
@@ -194,6 +212,12 @@ func (s *server) onCallback(cq *tgbotapi.CallbackQuery) {
 			return
 		}
 		_ = s.answerCB(cq, "Format selected: "+strings.ToUpper(format))
+
+		// Log key UI events - format button tapped
+		log.Info().
+			Int64("user_id", cq.From.ID).
+			Str("format", format).
+			Msg("format selected")
 
 		s.setState(userID, "awaiting_amount")
 		rem := s.remainingToday(userID)
@@ -237,6 +261,14 @@ func (s *server) handleAmountInput(m *tgbotapi.Message) {
 		return
 	}
 
+	// Log key UI events - amount parsed and validated
+	log.Info().
+		Int("amount", amt).
+		Int("videos", len(items)).
+		Int("planned_outputs", planned).
+		Int("remaining_today", remain).
+		Msg("amount accepted; enqueueing session")
+
 	// Enqueue session:start
 	sid := "" // worker will generate if empty
 	payload := jobs.StartSessionPayload{
@@ -250,6 +282,8 @@ func (s *server) handleAmountInput(m *tgbotapi.Message) {
 	b, _ := json.Marshal(payload)
 	_, err = s.asynq.EnqueueContext(rctx, asynq.NewTask(jobs.TaskStartSession, b), asynq.MaxRetry(5))
 	if err != nil {
+		// Log enqueue failure
+		log.Error().Err(err).Msg("asynq enqueue session:start failed")
 		_, _ = s.bot.Send(tgbotapi.NewMessage(chatID, "Queue error: "+err.Error()))
 		return
 	}
@@ -327,6 +361,10 @@ func (s *server) finalizeGroup(userID int64, mgid string, chatID int64) {
 		_, _ = s.bot.Send(tgbotapi.NewMessage(chatID, "Internal error (pending). Try again."))
 		return
 	}
+	
+	// Log key UI events - videos collected; asking for format
+	log.Info().Int("count", len(items)).Msg("videos collected; asking for format")
+	
 	s.setState(userID, "awaiting_format")
 	s.askFormat(chatID)
 }

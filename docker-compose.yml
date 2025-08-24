@@ -9,8 +9,14 @@ services:
       context: .
       dockerfile: docker/Dockerfile.bot
     env_file: .env
+    environment:
+      - LOG_FORMAT=json
+      - LOG_LEVEL=info
+      - LOG_FILE=/var/log/uniqueizer/bot.log
     depends_on: [redis]
     restart: unless-stopped
+    volumes:
+      - ./logs:/var/log/uniqueizer
     healthcheck:
       test: ["CMD","curl","-f","http://localhost:8080/health"]
       interval: 10s
@@ -22,9 +28,14 @@ services:
       context: .
       dockerfile: docker/Dockerfile.worker
     env_file: .env
+    environment:
+      - LOG_FORMAT=json
+      - LOG_LEVEL=info
+      - LOG_FILE=/var/log/uniqueizer/worker.log
     depends_on: [redis]
     restart: unless-stopped
     volumes:
+      - ./logs:/var/log/uniqueizer
       - data:/data
     deploy:
       resources:

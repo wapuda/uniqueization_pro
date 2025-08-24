@@ -26,6 +26,9 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/oklog/ulid/v2"
 	"github.com/redis/go-redis/v9"
+	"github.com/rs/zerolog"
+    "github.com/rs/zerolog/log"
+    "github.com/wapuda/uniqueization_pro/internal/logx"
 
 	"github.com/wapuda/uniqueization_pro/internal/jobs"
 )
@@ -106,6 +109,9 @@ func main() {
 	_ = godotenv.Load()
 	c := loadCfg()
 
+	logx.Setup(logx.FromEnv("worker"))
+	logx.Info().Msg("worker starting")
+
 	token := os.Getenv("BOT_TOKEN")
 	if token == "" {
 		log.Fatal("BOT_TOKEN required")
@@ -151,30 +157,44 @@ func main() {
 		return handleFinalize(ctx, bot, rdb, c, p)
 	})
 
-	log.Println("worker v2 starting…")
+	logx.Info().Msg("worker v2 starting…")
 	if err := srv.Run(mux); err != nil {
 		log.Fatal(err)
 	}
 }
 
 func handleStartSession(ctx context.Context, bot *tgbotapi.BotAPI, rdb *redis.Client, c cfg, p jobs.StartSessionPayload) error {
+	// Add context fields (sid/uid) inside handlers
+	ctx = context.WithValue(ctx, logx.CtxKeySessionID, p.SessionID)
+	ctx = context.WithValue(ctx, logx.CtxKeyUserID, p.UserID)
+
+	logx.FromCtx(ctx).Info().
+		Str("format", p.Format).
+		Int("amount", p.Amount).
+		Int("total", len(p.Items)*p.Amount).
+		Msg("session:start accepted")
 	// Validate
 	f := strings.ToLower(p.Format)
 	if f != "mp4" && f != "mov" {
+		logx.FromCtx(ctx).Error().Str("format", p.Format).Msg("invalid format selected")
 		return sendAndErr(bot, p.ChatID, "Select one format: mp4 or mov.")
 	}
 	if len(p.Items) == 0 || len(p.Items) > c.MaxVideosPerMsg {
+		logx.FromCtx(ctx).Error().Int("items", len(p.Items)).Int("max", c.MaxVideosPerMsg).Msg("invalid number of videos")
 		return sendAndErr(bot, p.ChatID, fmt.Sprintf("You can send 1 to %d videos per session.", c.MaxVideosPerMsg))
 	}
 	if p.Amount < 1 || p.Amount > c.PerVideoMax {
+		logx.FromCtx(ctx).Error().Int("amount", p.Amount).Int("max", c.PerVideoMax).Msg("invalid amount per video")
 		return sendAndErr(bot, p.ChatID, fmt.Sprintf("Amount must be 1..%d per video.", c.PerVideoMax))
 	}
 	total := len(p.Items) * p.Amount
 	remain, ok, err := checkDailyAllowance(ctx, rdb, c, p.UserID, total)
 	if err != nil {
+		logx.FromCtx(ctx).Error().Err(err).Msg("failed to check daily allowance")
 		return err
 	}
 	if !ok {
+		logx.FromCtx(ctx).Error().Int("requested", total).Int("remaining", remain).Int("daily_max", c.DailyMax).Msg("daily limit exceeded")
 		return sendAndErr(bot, p.ChatID, fmt.Sprintf("Daily limit is %d. You have %d left for today. Enter a smaller amount.", c.DailyMax, remain))
 	}
 
@@ -204,16 +224,19 @@ func handleStartSession(ctx context.Context, bot *tgbotapi.BotAPI, rdb *redis.Cl
 	for i, it := range p.Items {
 		srcPath, baseName, err := downloadFromTelegram(ctx, os.Getenv("BOT_TOKEN"), it.FileID, srcDir)
 		if err != nil {
+			logx.FromCtx(ctx).Error().Err(err).Str("file_id", it.FileID).Msg("download from Telegram failed")
 			return sendAndErr(bot, p.ChatID, "Download failed: "+err.Error())
 		}
 		dur, w, h, err := probeVideo(ctx, srcPath)
 		if err != nil {
+			logx.FromCtx(ctx).Error().Err(err).Str("src_path", srcPath).Msg("video probe failed")
 			return sendAndErr(bot, p.ChatID, "Probe failed: "+err.Error())
 		}
 		_ = w
 		_ = h
 		info, err := os.Stat(srcPath)
 		if err != nil {
+			logx.FromCtx(ctx).Error().Err(err).Str("src_path", srcPath).Msg("failed to stat source file")
 			return err
 		}
 		for k := 1; k <= p.Amount; k++ {
@@ -242,6 +265,10 @@ func handleStartSession(ctx context.Context, bot *tgbotapi.BotAPI, rdb *redis.Cl
 }
 
 func handleEncodeVariant(ctx context.Context, bot *tgbotapi.BotAPI, rdb *redis.Client, c cfg, p jobs.EncodeVariantPayload) error {
+	// Add context fields (sid/uid) inside handlers
+	ctx = context.WithValue(ctx, logx.CtxKeySessionID, p.SessionID)
+	ctx = context.WithValue(ctx, logx.CtxKeyUserID, p.UserID)
+
 	// Choose target size
 	r := randRange(c.RatioMin, c.RatioMax)
 	targetBytes := int64(float64(p.OrigBytes) * r)
@@ -258,10 +285,12 @@ func handleEncodeVariant(ctx context.Context, bot *tgbotapi.BotAPI, rdb *redis.C
 	// Encode with adaptive loop
 	outDir := filepath.Join(c.DataDir, "sessions", p.SessionID, "out")
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		logx.FromCtx(ctx).Error().Err(err).Str("out_dir", outDir).Msg("failed to create output directory")
 		return err
 	}
 	outPath, err := encodeAdaptive(ctx, p, outDir, targetBytes, c)
 	if err != nil {
+		logx.FromCtx(ctx).Error().Err(err).Str("src_path", p.SrcPath).Str("out_dir", outDir).Msg("encode adaptive failed")
 		return err
 	}
 
@@ -289,18 +318,25 @@ func handleEncodeVariant(ctx context.Context, bot *tgbotapi.BotAPI, rdb *redis.C
 }
 
 func handleFinalize(ctx context.Context, bot *tgbotapi.BotAPI, rdb *redis.Client, c cfg, p jobs.FinalizePayload) error {
+	// Add context fields (sid/uid) inside handlers
+	ctx = context.WithValue(ctx, logx.CtxKeySessionID, p.SessionID)
+	ctx = context.WithValue(ctx, logx.CtxKeyUserID, p.UserID)
+
 	// Build ZIP
 	base := filepath.Join(c.DataDir, "sessions", p.SessionID)
 	outDir := filepath.Join(base, "out")
 	paths, err := rdb.LRange(ctx, keySessionOuts(p.SessionID), 0, -1).Result()
 	if err != nil {
+		logx.FromCtx(ctx).Error().Err(err).Msg("failed to get session outputs from Redis")
 		return err
 	}
 	if len(paths) == 0 {
+		logx.FromCtx(ctx).Error().Msg("no outputs to zip")
 		return errors.New("no outputs to zip")
 	}
 	zipPath := filepath.Join(base, fmt.Sprintf("UNIQ-%s.zip", p.SessionID))
 	if err := makeZip(zipPath, outDir, paths); err != nil {
+		logx.FromCtx(ctx).Error().Err(err).Str("zip_path", zipPath).Int("files", len(paths)).Msg("failed to create ZIP")
 		return err
 	}
 
@@ -308,12 +344,13 @@ func handleFinalize(ctx context.Context, bot *tgbotapi.BotAPI, rdb *redis.Client
 	doc := tgbotapi.NewDocument(p.ChatID, tgbotapi.FilePath(zipPath))
 	doc.Caption = "Your unified videos (ZIP)"
 	if _, err := bot.Send(doc); err != nil {
+		logx.FromCtx(ctx).Error().Err(err).Str("zip_path", zipPath).Msg("failed to send ZIP to Telegram")
 		return err
 	}
 
 	// Charge daily quota & finish message
 	if err := chargeDaily(ctx, rdb, c, p.UserID, p.Total); err != nil {
-		log.Println("quota charge error:", err)
+		logx.FromCtx(ctx).Error().Err(err).Int("total", p.Total).Msg("quota charge error")
 	}
 	_, _, mid, _ := getProgress(ctx, rdb, p.SessionID)
 	final := tgbotapi.NewEditMessageText(p.ChatID, mid, fmt.Sprintf("Done: %d / %d (100%%).", p.Total, p.Total))
@@ -380,6 +417,16 @@ func encodeAdaptive(ctx context.Context, p jobs.EncodeVariantPayload, outDir str
 	baseName := fmt.Sprintf("vid-%s-%s-%dx%d.%s", id, short, w, hgt, ext)
 	outPath := filepath.Join(outDir, baseName)
 
+	// Log encode attempt
+	logx.FromCtx(ctx).Info().
+		Str("src", p.SrcPath).
+		Str("out", outPath).
+		Str("format", p.Format).
+		Int64("target_bytes", targetBytes).
+		Int("width", w).
+		Int("height", hgt).
+		Msg("encode attempt")
+
 	// pick audio kbps & preset/gop
 	abr := c.AudioKbpsChoices[rand.Intn(len(c.AudioKbpsChoices))]
 	preset := pick([]string{"veryfast", "faster", "fast", "medium", "slow"})
@@ -404,6 +451,7 @@ func encodeAdaptive(ctx context.Context, p jobs.EncodeVariantPayload, outDir str
 	tryV := vbps
 	for i := 0; i < c.AdaptMaxTries; i++ {
 		if err := runFFmpegOnce(ctx, p.SrcPath, outPath, p.Format, tryV, abr, preset, gop, scaleW, scaleH); err != nil {
+			logx.FromCtx(ctx).Error().Err(err).Int("attempt", i+1).Int64("vbit", tryV).Msg("ffmpeg attempt failed")
 			return "", err
 		}
 		sz, _ := fileSize(outPath)
@@ -411,6 +459,7 @@ func encodeAdaptive(ctx context.Context, p jobs.EncodeVariantPayload, outDir str
 			// good enough or close to target?
 			diff := math.Abs(float64(sz-targetBytes)) / float64(targetBytes)
 			if diff <= c.SizeTolerance {
+				logx.FromCtx(ctx).Info().Int("attempt", i+1).Int64("size", sz).Int64("target", targetBytes).Float64("diff", diff).Msg("encode successful")
 				return outPath, nil
 			}
 			// else adjust bitrate toward target
@@ -434,13 +483,17 @@ func encodeAdaptive(ctx context.Context, p jobs.EncodeVariantPayload, outDir str
 
 	// fallback: 2-pass to hit target tightly
 	passlog := outPath + ".log"
+	logx.FromCtx(ctx).Info().Msg("falling back to two-pass encoding")
 	if err := runTwoPass(ctx, p.SrcPath, outPath, p.Format, targetBytes, abr, preset, gop, scaleW, scaleH, passlog); err != nil {
+		logx.FromCtx(ctx).Error().Err(err).Msg("two-pass encoding failed")
 		return "", err
 	}
 	sz, _ := fileSize(outPath)
 	if !(sz > p.OrigBytes && sz <= 2*p.OrigBytes) {
+		logx.FromCtx(ctx).Error().Int64("size", sz).Int64("min", p.OrigBytes+1).Int64("max", 2*p.OrigBytes).Msg("final size out of band")
 		return "", fmt.Errorf("final size out of band: got %d vs [%d..%d]", sz, p.OrigBytes+1, 2*p.OrigBytes)
 	}
+	logx.FromCtx(ctx).Info().Int64("size", sz).Int64("target", targetBytes).Msg("two-pass encoding successful")
 	return outPath, nil
 }
 
@@ -472,8 +525,23 @@ func runFFmpegOnce(ctx context.Context, in, out, format string, vbit int64, akbp
 	args = append(args, out)
 
 	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
-	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
-	return cmd.Run()
+
+	// capture stderr at debug level
+	stderr, _ := cmd.StderrPipe()
+	if err := cmd.Start(); err != nil {
+		logx.FromCtx(ctx).Error().Err(err).Msg("ffmpeg start failed")
+		return err
+	}
+	go logx.NewLineWriter(map[string]string{
+		"proc": "ffmpeg",
+		"step": "onepass",
+	}, zerolog.DebugLevel).Pipe(stderr)
+
+	if err := cmd.Wait(); err != nil {
+		logx.FromCtx(ctx).Error().Err(err).Msg("ffmpeg failed")
+		return err
+	}
+	return nil
 }
 
 func runTwoPass(ctx context.Context, in, out, format string, targetBytes int64, akbps int, preset string, gop int, scaleW, scaleH int, passlog string) error {
@@ -512,10 +580,23 @@ func runTwoPass(ctx context.Context, in, out, format string, targetBytes int64, 
 		"-f", "mp4", os.DevNull,
 	}
 	cmd1 := exec.CommandContext(ctx, "ffmpeg", args1...)
-	cmd1.Stdout, cmd1.Stderr = os.Stdout, os.Stderr
-	if err := cmd1.Run(); err != nil {
+	
+	// capture stderr at debug level for pass 1
+	stderr1, _ := cmd1.StderrPipe()
+	if err := cmd1.Start(); err != nil {
+		logx.FromCtx(ctx).Error().Err(err).Msg("ffmpeg pass 1 start failed")
 		return err
 	}
+	go logx.NewLineWriter(map[string]string{
+		"proc": "ffmpeg",
+		"step": "twopass1",
+	}, zerolog.DebugLevel).Pipe(stderr1)
+
+	if err := cmd1.Wait(); err != nil {
+		logx.FromCtx(ctx).Error().Err(err).Msg("ffmpeg pass 1 failed")
+		return err
+	}
+	
 	// pass 2 (with audio)
 	args2 := []string{
 		"-nostdin", "-y", "-i", in,
@@ -537,8 +618,23 @@ func runTwoPass(ctx context.Context, in, out, format string, targetBytes int64, 
 	}
 	args2 = append(args2, out)
 	cmd2 := exec.CommandContext(ctx, "ffmpeg", args2...)
-	cmd2.Stdout, cmd2.Stderr = os.Stdout, os.Stderr
-	return cmd2.Run()
+	
+	// capture stderr at debug level for pass 2
+	stderr2, _ := cmd2.StderrPipe()
+	if err := cmd2.Start(); err != nil {
+		logx.FromCtx(ctx).Error().Err(err).Msg("ffmpeg pass 2 start failed")
+		return err
+	}
+	go logx.NewLineWriter(map[string]string{
+		"proc": "ffmpeg",
+		"step": "twopass2",
+	}, zerolog.DebugLevel).Pipe(stderr2)
+
+	if err := cmd2.Wait(); err != nil {
+		logx.FromCtx(ctx).Error().Err(err).Msg("ffmpeg pass 2 failed")
+		return err
+	}
+	return nil
 }
 
 // --- Telegram I/O, ZIP, Redis helpers ---
