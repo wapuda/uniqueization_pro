@@ -20,7 +20,7 @@ import (
 	"github.com/oklog/ulid/v2"
 	"github.com/redis/go-redis/v9"
 
-	"github.com/you/tg-unifier/internal/jobs"
+	"github.com/wapuda/uniqueization_pro/internal/jobs"
 )
 
 /* ---------------------- config & utils ---------------------- */
